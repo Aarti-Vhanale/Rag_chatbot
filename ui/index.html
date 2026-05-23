@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RAG Chatbot</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', sans-serif; background: #0f1117; color: #e0e0e0; height: 100vh; display: flex; flex-direction: column; }
+  
+  header { background: #1a1d2e; padding: 16px 24px; border-bottom: 1px solid #2d3050; }
+  header h1 { font-size: 20px; color: #7c6af7; }
+  header p { font-size: 12px; color: #888; margin-top: 4px; }
+  
+  #stats-bar { background: #141620; padding: 8px 24px; font-size: 12px; color: #555; border-bottom: 1px solid #1e2030; }
+  
+  #chat-area { flex: 1; overflow-y: auto; padding: 20px 24px; display: flex; flex-direction: column; gap: 16px; }
+  
+  .message { max-width: 780px; width: 100%; }
+  .message.user { align-self: flex-end; }
+  .message.bot { align-self: flex-start; }
+  
+  .bubble { padding: 12px 16px; border-radius: 12px; line-height: 1.6; font-size: 14px; }
+  .user .bubble { background: #4f46e5; color: white; border-radius: 12px 12px 2px 12px; }
+  .bot .bubble { background: #1e2130; border: 1px solid #2d3050; border-radius: 12px 12px 12px 2px; }
+  
+  .sources { margin-top: 10px; padding: 10px 14px; background: #161823; border: 1px solid #2d3050; border-radius: 8px; font-size: 12px; }
+  .sources h4 { color: #7c6af7; margin-bottom: 6px; }
+  .source-item { padding: 4px 0; color: #aaa; border-bottom: 1px solid #1e2030; }
+  .source-item:last-child { border-bottom: none; }
+  .source-file { color: #7c6af7; font-weight: 600; }
+  
+  .latency { font-size: 11px; color: #444; margin-top: 6px; text-align: right; }
+  
+  .chunks-panel { background: #161823; border: 1px solid #2d3050; border-radius: 8px; padding: 10px 14px; margin-top: 10px; font-size: 12px; }
+  .chunks-panel h4 { color: #f59e0b; margin-bottom: 8px; cursor: pointer; }
+  .chunk-item { background: #0f1117; padding: 8px; border-radius: 6px; margin-top: 6px; color: #999; border-left: 3px solid #4f46e5; }
+  
+  #input-area { padding: 16px 24px; background: #1a1d2e; border-top: 1px solid #2d3050; display: flex; gap: 12px; }
+  #query-input { flex: 1; background: #0f1117; border: 1px solid #2d3050; border-radius: 8px; padding: 12px 16px; color: #e0e0e0; font-size: 14px; outline: none; }
+  #query-input:focus { border-color: #4f46e5; }
+  #send-btn { background: #4f46e5; color: white; border: none; border-radius: 8px; padding: 12px 24px; cursor: pointer; font-size: 14px; font-weight: 600; }
+  #send-btn:hover { background: #4338ca; }
+  #send-btn:disabled { background: #333; cursor: not-allowed; }
+  
+  .typing { display: flex; gap: 4px; padding: 12px 16px; }
+  .dot { width: 8px; height: 8px; background: #4f46e5; border-radius: 50%; animation: bounce 0.8s infinite; }
+  .dot:nth-child(2) { animation-delay: 0.15s; }
+  .dot:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes bounce { 0%, 80%, 100% { transform: translateY(0); } 40% { transform: translateY(-8px); } }
+  
+  .toggle-chunks { background: none; border: none; color: #f59e0b; font-size: 12px; cursor: pointer; margin-top: 8px; padding: 0; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🔍 RAG Document Chatbot</h1>
+  <p>Ask questions from your PDF knowledge base</p>
+</header>
+
+<div id="stats-bar">Loading stats...</div>
+
+<div id="chat-area">
+  <div class="message bot">
+    <div class="bubble">
+      👋 Hi! I'm your document assistant. Ask me anything from the ingested PDFs.<br><br>
+      I'll retrieve relevant passages and cite the exact PDF and page number.
+    </div>
+  </div>
+</div>
+
+<div id="input-area">
+  <input id="query-input" type="text" placeholder="Ask a question from the documents..." 
+         onkeydown="if(event.key==='Enter') sendQuery()">
+  <button id="send-btn" onclick="sendQuery()">Send</button>
+</div>
+
+<script>
+const chatArea = document.getElementById('chat-area');
+const queryInput = document.getElementById('query-input');
+const sendBtn = document.getElementById('send-btn');
+
+// Load stats
+fetch('/stats').then(r => r.json()).then(s => {
+  document.getElementById('stats-bar').textContent = 
+    `📚 ${s.total_chunks} chunks indexed | Model: ${s.embedding_model} | LLM: ${s.llm}`;
+}).catch(() => {
+  document.getElementById('stats-bar').textContent = 'Stats unavailable';
+});
+
+function addMessage(type, content) {
+  const div = document.createElement('div');
+  div.className = `message ${type}`;
+  div.innerHTML = content;
+  chatArea.appendChild(div);
+  chatArea.scrollTop = chatArea.scrollHeight;
+  return div;
+}
+
+function showTyping() {
+  return addMessage('bot', `
+    <div class="bubble">
+      <div class="typing">
+        <div class="dot"></div><div class="dot"></div><div class="dot"></div>
+      </div>
+    </div>
+  `);
+}
+
+function toggleChunks(btn, id) {
+  const panel = document.getElementById(id);
+  panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+  btn.textContent = panel.style.display === 'none' ? '▶ Show Retrieved Chunks' : '▼ Hide Retrieved Chunks';
+}
+
+async function sendQuery() {
+  const query = queryInput.value.trim();
+  if (!query) return;
+
+  // Show user message
+  addMessage('user', `<div class="bubble">${escapeHtml(query)}</div>`);
+  queryInput.value = '';
+  sendBtn.disabled = true;
+
+  // Show typing indicator
+  const typingDiv = showTyping();
+
+  try {
+    const resp = await fetch('/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, use_reranker: true })
+    });
+
+    const data = await resp.json();
+    typingDiv.remove();
+
+    // Build sources HTML
+    let sourcesHtml = '';
+    if (data.sources && data.sources.length > 0) {
+      const items = data.sources.map(s => `
+        <div class="source-item">
+          📄 <span class="source-file">${s.filename}</span> — Page ${s.page_number}
+          ${s.score ? `<span style="color:#555; margin-left:8px">(score: ${s.score.toFixed(3)})</span>` : ''}
+          <div style="color:#666; margin-top:3px; font-size:11px">${s.preview}</div>
+        </div>`).join('');
+      
+      const chunkId = 'chunks_' + Date.now();
+      sourcesHtml = `
+        <div class="sources">
+          <h4>📚 Sources (${data.sources.length})</h4>
+          ${items}
+        </div>
+        <button class="toggle-chunks" onclick="toggleChunks(this, '${chunkId}')">▶ Show Retrieved Chunks</button>
+        <div id="${chunkId}" class="chunks-panel" style="display:none">
+          <h4>🔍 Retrieved Chunks</h4>
+          ${data.sources.map((s,i) => `
+            <div class="chunk-item">
+              <b>Chunk ${i+1}</b>: ${s.filename} p.${s.page_number}<br>
+              ${s.preview}
+            </div>`).join('')}
+        </div>
+      `;
+    }
+
+    addMessage('bot', `
+      <div class="bubble">${escapeHtml(data.answer).replace(/\n/g, '<br>')}</div>
+      ${sourcesHtml}
+      <div class="latency">⚡ ${data.latency_ms}ms</div>
+    `);
+
+  } catch (err) {
+    typingDiv.remove();
+    addMessage('bot', `<div class="bubble" style="color:#f87171">❌ Error: ${err.message}</div>`);
+  }
+
+  sendBtn.disabled = false;
+  queryInput.focus();
+}
+
+function escapeHtml(text) {
+  return text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+</script>
+</body>
+</html>
